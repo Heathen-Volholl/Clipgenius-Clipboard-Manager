@@ -1,0 +1,393 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useClipboardHistory } from '../hooks/useClipboardHistory';
+import { ClipboardItem, ItemType, Tag, Template } from '../types';
+import { analyzeCode, extractTextFromImage, formatCode, translateText } from '../services/geminiService';
+import { Icons, ItemTypeIcon } from './icons';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { atomDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+
+// --- UTILITY FUNCTIONS ---
+const getMimeType = (file: File): string => file.type;
+const fileToBase64 = (file: File): Promise<string> => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.readAsDataURL(file);
+  reader.onload = () => resolve((reader.result as string).split(',')[1]);
+  reader.onerror = error => reject(error);
+});
+const truncate = (str: string, length: number) => str.length > length ? `${str.substring(0, length)}...` : str;
+
+const analyzeTextContent = (text: string): { type: ItemType; preview: string; } => {
+    if (/^https?:\/\/[^\s$.?#].[^\s]*$/i.test(text)) return { type: ItemType.LINK, preview: text };
+    if (/^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}$/.test(text)) return { type: ItemType.EMAIL, preview: text };
+    if (/^(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}$/.test(text)) return { type: ItemType.PHONE, preview: text };
+    if (/^(rgb|hsl)a?\((\s*\d+\s*,){2,3}\s*[\d.]+\s*\)|#([0-9a-f]{3}){1,2}$/i.test(text)) return { type: ItemType.COLOR, preview: text };
+    // Basic check for code-like structures
+    if (/[{};=()]/.test(text.substring(0, 200)) && text.includes('\n')) return { type: ItemType.CODE, preview: truncate(text, 100) };
+    return { type: ItemType.TEXT, preview: truncate(text, 100) };
+};
+
+// --- SUB-COMPONENTS (Defined outside main component to prevent re-creation on re-renders) ---
+
+interface SidebarProps {
+  tags: Tag[];
+  activeTag: string | null;
+  onTagClick: (tag: string | null) => void;
+  templates: Template[];
+  onTemplateUse: (content: string) => void;
+  onTemplateAdd: () => void;
+  onTemplateDelete: (id: string) => void;
+}
+const Sidebar: React.FC<SidebarProps> = ({ tags, activeTag, onTagClick, templates, onTemplateUse, onTemplateAdd, onTemplateDelete }) => (
+    <div className="w-64 bg-slate-800/50 p-4 flex flex-col shrink-0">
+        <h2 className="text-lg font-bold mb-4 text-slate-300">ClipGenius</h2>
+        <div className="mb-6">
+            <h3 className="text-sm font-semibold text-slate-400 mb-2 flex items-center"><Icons.Tag className="w-4 h-4 mr-2"/> Tags</h3>
+            <div className="flex flex-col space-y-1">
+                <button onClick={() => onTagClick(null)} className={`text-left text-sm p-2 rounded-md ${!activeTag ? 'bg-sky-500/20 text-sky-400' : 'hover:bg-slate-700/50'}`}>All Items</button>
+                {tags.map(tag => (
+                    <button key={tag.name} onClick={() => onTagClick(tag.name)} className={`text-left text-sm p-2 rounded-md flex justify-between items-center ${activeTag === tag.name ? 'bg-sky-500/20 text-sky-400' : 'hover:bg-slate-700/50'}`}>
+                        <span>{tag.name}</span>
+                        <span className="text-xs bg-slate-600 px-1.5 py-0.5 rounded-full">{tag.count}</span>
+                    </button>
+                ))}
+            </div>
+        </div>
+        <div>
+            <h3 className="text-sm font-semibold text-slate-400 mb-2 flex items-center justify-between">
+                <div className="flex items-center"><Icons.Star className="w-4 h-4 mr-2"/> Templates</div>
+                <button onClick={onTemplateAdd} className="p-1 hover:bg-slate-700/50 rounded"><Icons.Plus className="w-4 h-4"/></button>
+            </h3>
+            <div className="flex flex-col space-y-1 max-h-64 overflow-y-auto">
+                {templates.map(t => (
+                    <div key={t.id} className="group text-left text-sm p-2 rounded-md hover:bg-slate-700/50 flex justify-between items-center">
+                        <button onClick={() => onTemplateUse(t.content)} className="flex-grow text-left">
+                            <p className="font-semibold">{t.name}</p>
+                            <p className="text-xs text-slate-400">{truncate(t.content, 30)}</p>
+                        </button>
+                        <button onClick={() => onTemplateDelete(t.id)} className="opacity-0 group-hover:opacity-100 p-1 text-rose-400 hover:bg-rose-500/20 rounded"><Icons.Trash className="w-3 h-3"/></button>
+                    </div>
+                ))}
+            </div>
+        </div>
+    </div>
+);
+
+interface HistoryListProps {
+  items: ClipboardItem[];
+  selectedId: string | null;
+  onSelect: (item: ClipboardItem) => void;
+  onDelete: (id: string) => void;
+}
+const HistoryList: React.FC<HistoryListProps> = ({ items, selectedId, onSelect, onDelete }) => (
+    <div className="flex-1 p-4 overflow-y-auto">
+        <div className="grid grid-cols-1 gap-3">
+            {items.map(item => (
+                <button key={item.id} onClick={() => onSelect(item)} className={`p-3 rounded-lg text-left transition-colors duration-200 group ${selectedId === item.id ? 'bg-sky-500/10' : 'bg-slate-800/70 hover:bg-slate-700/70'}`}>
+                    <div className="flex items-start">
+                        <div className="mr-3 pt-1">
+                          <ItemTypeIcon type={item.type} className="w-5 h-5 text-slate-400"/>
+                        </div>
+                        <div className="flex-1 overflow-hidden">
+                            {item.type === ItemType.IMAGE ? (
+                                <img src={`data:image/png;base64,${item.content}`} alt="clipboard item" className="max-h-24 rounded-md object-contain"/>
+                            ) : (
+                               <p className="text-sm text-slate-200 break-words whitespace-pre-wrap font-mono">{item.preview}</p>
+                            )}
+                        </div>
+                        <button onClick={(e) => { e.stopPropagation(); onDelete(item.id); }} className="p-1.5 text-slate-500 rounded-full hover:bg-rose-500/20 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <Icons.Trash className="w-4 h-4"/>
+                        </button>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between">
+                         <div className="flex gap-1.5">
+                            {item.tags.map(tag => <span key={tag} className="text-xs bg-slate-700 px-2 py-0.5 rounded-full">{tag}</span>)}
+                        </div>
+                        <span className="text-xs text-slate-500">{new Date(item.createdAt).toLocaleTimeString()}</span>
+                    </div>
+                </button>
+            ))}
+        </div>
+    </div>
+);
+
+interface DetailViewProps {
+    item: ClipboardItem | null;
+    onUpdate: (id: string, updates: Partial<ClipboardItem>) => void;
+}
+const DetailView: React.FC<DetailViewProps> = ({ item, onUpdate }) => {
+    const [copied, setCopied] = useState(false);
+    const [isProcessing, setIsProcessing] = useState(false);
+
+    useEffect(() => {
+        setCopied(false);
+        setIsProcessing(false);
+    }, [item]);
+
+    if (!item) {
+        return <div className="w-1/3 bg-slate-900/70 p-6 flex flex-col items-center justify-center text-slate-500">
+            <Icons.Clipboard className="w-16 h-16 mb-4"/>
+            <h3 className="text-lg">Select an item</h3>
+            <p className="text-sm text-center">Select an item from the list to see its details and perform actions.</p>
+        </div>;
+    }
+
+    const handleCopy = () => {
+        navigator.clipboard.writeText(item.content);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+    };
+
+    const handleOCR = async () => {
+        if (item.type !== ItemType.IMAGE) return;
+        setIsProcessing(true);
+        const text = await extractTextFromImage(item.content, 'image/png');
+        onUpdate(item.id, { metadata: { ...item.metadata, ocrText: text } });
+        setIsProcessing(false);
+    };
+
+    const handleFormatCode = async () => {
+        if (item.type !== ItemType.CODE || !item.metadata?.language) return;
+        setIsProcessing(true);
+        const formatted = await formatCode(item.content, item.metadata.language);
+        onUpdate(item.id, { content: formatted, preview: truncate(formatted, 100) });
+        setIsProcessing(false);
+    };
+
+    const handleTranslate = async (language: string) => {
+        setIsProcessing(true);
+        const translation = await translateText(item.content, language);
+        onUpdate(item.id, { metadata: { ...item.metadata, translation } });
+        setIsProcessing(false);
+    }
+    
+    const renderContent = () => {
+        switch (item.type) {
+            case ItemType.IMAGE:
+                return <img src={`data:image/png;base64,${item.content}`} alt="clipboard content" className="w-full rounded-lg object-contain max-h-64"/>;
+            case ItemType.CODE:
+                return (
+                    <div className="relative group">
+                      <SyntaxHighlighter language={item.metadata?.language || 'plaintext'} style={atomDark} customStyle={{ margin: 0, borderRadius: '0.5rem', maxHeight: '50vh' }}>
+                        {item.content}
+                      </SyntaxHighlighter>
+                    </div>
+                );
+            case ItemType.COLOR:
+                return (
+                    <div className="flex items-center gap-4">
+                        <div className="w-24 h-24 rounded-lg border-4 border-slate-700" style={{ backgroundColor: item.content }}></div>
+                        <p className="text-2xl font-mono">{item.content}</p>
+                    </div>
+                );
+            default:
+                return <p className="text-base whitespace-pre-wrap break-words bg-slate-800 p-4 rounded-lg font-mono">{item.content}</p>;
+        }
+    };
+    
+    const renderActions = () => {
+      const commonActions = <>
+         {item.metadata?.isSensitive && <div className="flex items-center gap-2 p-2 rounded-md bg-amber-500/10 text-amber-400 text-xs"><Icons.Warning className="w-4 h-4 shrink-0"/> Potentially sensitive data detected.</div>}
+         <button onClick={handleCopy} className="w-full flex items-center justify-center gap-2 p-2 rounded-md bg-sky-500/20 hover:bg-sky-500/30 text-sky-300">
+             {copied ? <><Icons.Check className="w-4 h-4"/> Copied!</> : <><Icons.Copy className="w-4 h-4"/> Copy</>}
+         </button>
+      </>;
+
+      switch(item.type) {
+        case ItemType.IMAGE:
+          return <>
+            {commonActions}
+            <button disabled={isProcessing} onClick={handleOCR} className="w-full flex items-center justify-center gap-2 p-2 rounded-md bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 disabled:opacity-50">
+              <Icons.Brain className="w-4 h-4"/> {isProcessing ? 'Extracting...' : 'Extract Text (OCR)'}
+            </button>
+            {item.metadata?.ocrText && <div className="mt-2 p-3 bg-slate-800 rounded-lg text-sm "><h4 className="font-semibold mb-1 text-slate-400">Extracted Text:</h4><p className="whitespace-pre-wrap">{item.metadata.ocrText}</p></div>}
+          </>;
+        case ItemType.CODE:
+           return <>
+            {commonActions}
+            <button disabled={isProcessing} onClick={handleFormatCode} className="w-full flex items-center justify-center gap-2 p-2 rounded-md bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 disabled:opacity-50">
+              <Icons.Format className="w-4 h-4"/> {isProcessing ? 'Formatting...' : `Format ${item.metadata?.language || ''}`}
+            </button>
+           </>
+        case ItemType.TEXT:
+        case ItemType.LINK:
+        case ItemType.EMAIL:
+        case ItemType.PHONE:
+           return <>
+            {commonActions}
+            <div className="flex gap-2">
+            <button disabled={isProcessing} onClick={() => handleTranslate('Spanish')} className="w-full flex items-center justify-center gap-2 p-2 rounded-md bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 disabled:opacity-50">
+              <Icons.Translate className="w-4 h-4"/> {isProcessing ? 'Translating...' : 'To Spanish'}
+            </button>
+             <button disabled={isProcessing} onClick={() => handleTranslate('Japanese')} className="w-full flex items-center justify-center gap-2 p-2 rounded-md bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 disabled:opacity-50">
+              <Icons.Translate className="w-4 h-4"/> {isProcessing ? 'Translating...' : 'To Japanese'}
+            </button>
+            </div>
+            {item.metadata?.translation && <div className="mt-2 p-3 bg-slate-800 rounded-lg text-sm "><h4 className="font-semibold mb-1 text-slate-400">Translation:</h4><p className="whitespace-pre-wrap">{item.metadata.translation}</p></div>}
+           </>
+        default:
+          return commonActions;
+      }
+    };
+    
+    return (
+        <div className="w-1/3 bg-slate-800/30 p-6 flex flex-col overflow-y-auto">
+            <div className="flex-1">
+                <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2 text-lg font-bold">
+                        <ItemTypeIcon type={item.type} className="w-6 h-6"/>
+                        <span>{ItemType[item.type]}</span>
+                    </div>
+                    <span className="text-sm text-slate-400">{new Date(item.createdAt).toLocaleString()}</span>
+                </div>
+                <div className="mb-4">{renderContent()}</div>
+            </div>
+            <div className="flex flex-col gap-2 mt-auto">
+                {renderActions()}
+            </div>
+        </div>
+    );
+};
+
+// --- MAIN COMPONENT ---
+const ClipboardManager: React.FC = () => {
+    const { history, addItem, deleteItem, updateItem, clearHistory, templates, addTemplate, deleteTemplate } = useClipboardHistory();
+    const [selectedItem, setSelectedItem] = useState<ClipboardItem | null>(null);
+    const [searchTerm, setSearchTerm] = useState('');
+    const [activeTag, setActiveTag] = useState<string | null>(null);
+
+    useEffect(() => {
+        const handlePaste = async (event: ClipboardEvent) => {
+            const clipboardData = event.clipboardData;
+            if (!clipboardData) return;
+
+            let newItem: ClipboardItem | null = null;
+            const text = clipboardData.getData('text/plain');
+
+            if (clipboardData.files.length > 0 && clipboardData.files[0].type.startsWith('image/')) {
+                const file = clipboardData.files[0];
+                const base64 = await fileToBase64(file);
+                newItem = {
+                    id: crypto.randomUUID(),
+                    type: ItemType.IMAGE,
+                    content: base64,
+                    preview: 'Image',
+                    createdAt: Date.now(),
+                    tags: ['image'],
+                };
+            } else if (text) {
+                const { type, preview } = analyzeTextContent(text);
+                newItem = {
+                    id: crypto.randomUUID(),
+                    type,
+                    content: text,
+                    preview,
+                    createdAt: Date.now(),
+                    tags: [type.toLowerCase()],
+                };
+
+                if (type === ItemType.CODE) {
+                  const { language, isSensitive } = await analyzeCode(text);
+                  newItem.metadata = { language, isSensitive };
+                  newItem.tags.push(language);
+                }
+            }
+            
+            if (newItem) {
+                addItem(newItem);
+                setSelectedItem(newItem);
+            }
+        };
+
+        document.addEventListener('paste', handlePaste);
+        return () => document.removeEventListener('paste', handlePaste);
+    }, [addItem]);
+
+    useEffect(() => {
+        if (selectedItem && !history.find(h => h.id === selectedItem.id)) {
+            setSelectedItem(null);
+        }
+    }, [history, selectedItem]);
+    
+    const handleDeleteItem = (id: string) => {
+        deleteItem(id);
+        if (selectedItem?.id === id) {
+            setSelectedItem(null);
+        }
+    }
+
+    const tags = useMemo<Tag[]>(() => {
+        const tagCount: Record<string, number> = {};
+        history.forEach(item => {
+            item.tags.forEach(tag => {
+                tagCount[tag] = (tagCount[tag] || 0) + 1;
+            });
+        });
+        return Object.entries(tagCount).map(([name, count]) => ({ name, count })).sort((a,b) => b.count - a.count);
+    }, [history]);
+
+    const filteredHistory = useMemo(() => {
+        return history.filter(item => {
+            const matchesSearch = item.content.toLowerCase().includes(searchTerm.toLowerCase()) || item.preview.toLowerCase().includes(searchTerm.toLowerCase());
+            const matchesTag = !activeTag || item.tags.includes(activeTag);
+            return matchesSearch && matchesTag;
+        });
+    }, [history, searchTerm, activeTag]);
+
+    const handleTemplateAdd = () => {
+        const name = prompt("Enter template name:");
+        const content = prompt("Enter template content:");
+        if (name && content) {
+            addTemplate({ name, content });
+        }
+    };
+    
+    const handleUseTemplate = async (content: string) => {
+        try {
+            await navigator.clipboard.writeText(content);
+            alert("Template content copied to clipboard!");
+        } catch (err) {
+            console.error('Failed to copy: ', err);
+            alert("Failed to copy template content.");
+        }
+    }
+
+    return (
+        <div className="flex h-full w-full">
+            <Sidebar 
+              tags={tags} 
+              activeTag={activeTag} 
+              onTagClick={setActiveTag} 
+              templates={templates} 
+              onTemplateAdd={handleTemplateAdd}
+              onTemplateDelete={deleteTemplate}
+              onTemplateUse={handleUseTemplate}
+            />
+            <div className="flex-[2] bg-slate-900 flex flex-col">
+                <div className="p-4 border-b border-slate-700/50">
+                    <div className="relative">
+                       <Icons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500"/>
+                       <input 
+                         type="text" 
+                         placeholder="Search history..." 
+                         value={searchTerm} 
+                         onChange={(e) => setSearchTerm(e.target.value)} 
+                         className="w-full bg-slate-800 rounded-full pl-10 pr-4 py-2 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                       />
+                    </div>
+                </div>
+                {filteredHistory.length === 0 ? (
+                  <div className="flex-1 flex flex-col items-center justify-center text-slate-500 p-4">
+                      <Icons.Clipboard className="w-16 h-16 mb-4"/>
+                      <h3 className="text-lg">Your clipboard is empty</h3>
+                      <p className="text-sm text-center">Press <kbd className="px-2 py-1.5 text-xs font-semibold text-gray-800 bg-gray-100 border border-gray-200 rounded-lg">Ctrl+V</kbd> or <kbd className="px-2 py-1.5 text-xs font-semibold text-gray-800 bg-gray-100 border border-gray-200 rounded-lg">Cmd+V</kbd> to add an item.</p>
+                  </div>
+                ) : (
+                  <HistoryList items={filteredHistory} selectedId={selectedItem?.id || null} onSelect={setSelectedItem} onDelete={handleDeleteItem}/>
+                )}
+            </div>
+            <DetailView item={selectedItem} onUpdate={updateItem}/>
+        </div>
+    );
+};
+
+export default ClipboardManager;
