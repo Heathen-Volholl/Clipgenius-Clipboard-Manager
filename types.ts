@@ -19,11 +19,8 @@ export interface ClipboardItem {
   tags: string[];
   metadata?: {
     language?: string; // For code
-    ocrText?: string;
-    translation?: string;
     fileName?: string;
     fileType?: string;
-    isSensitive?: boolean;
   };
 }
 

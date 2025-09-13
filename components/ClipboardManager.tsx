@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useClipboardHistory } from '../hooks/useClipboardHistory';
 import { ClipboardItem, ItemType, Tag, Template } from '../types';
-import { analyzeCode, extractTextFromImage, formatCode, translateText } from '../services/geminiService';
 import { Icons, ItemTypeIcon } from './icons';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { atomDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -78,88 +77,74 @@ interface HistoryListProps {
   onSelect: (item: ClipboardItem) => void;
   onDelete: (id: string) => void;
 }
-const HistoryList: React.FC<HistoryListProps> = ({ items, selectedId, onSelect, onDelete }) => (
-    <div className="flex-1 p-4 overflow-y-auto">
-        <div className="grid grid-cols-1 gap-3">
-            {items.map(item => (
-                <button key={item.id} onClick={() => onSelect(item)} className={`p-3 rounded-lg text-left transition-colors duration-200 group ${selectedId === item.id ? 'bg-sky-500/10' : 'bg-slate-800/70 hover:bg-slate-700/70'}`}>
-                    <div className="flex items-start">
-                        <div className="mr-3 pt-1">
-                          <ItemTypeIcon type={item.type} className="w-5 h-5 text-slate-400"/>
+const HistoryList: React.FC<HistoryListProps> = ({ items, selectedId, onSelect, onDelete }) => {
+    return (
+        <div className="flex-1 p-4 overflow-y-auto">
+            <div className="grid grid-cols-1 gap-3">
+                {items.map(item => (
+                    <button
+                        key={item.id}
+                        onClick={() => onSelect(item)}
+                        className={`p-3 rounded-lg text-left transition-colors duration-200 group ${selectedId === item.id ? 'bg-sky-500/10' : 'bg-slate-800/70 hover:bg-slate-700/70'}`}
+                    >
+                        <div className="flex items-start">
+                            <div className="mr-3 pt-1">
+                                <ItemTypeIcon type={item.type} className="w-5 h-5 text-slate-400" />
+                            </div>
+                            <div className="flex-1 overflow-hidden">
+                                {item.type === ItemType.IMAGE ? (
+                                    <img src={`data:image/png;base64,${item.content}`} alt="clipboard item" className="max-h-24 rounded-md object-contain" />
+                                ) : (
+                                    <p className="text-sm text-slate-200 break-words whitespace-pre-wrap font-mono">{item.preview}</p>
+                                )}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={e => {
+                                    e.stopPropagation();
+                                    onDelete(item.id);
+                                }}
+                                className="p-1.5 text-slate-500 rounded-full hover:bg-rose-500/20 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                                <Icons.Trash className="w-4 h-4" />
+                            </button>
                         </div>
-                        <div className="flex-1 overflow-hidden">
-                            {item.type === ItemType.IMAGE ? (
-                                <img src={`data:image/png;base64,${item.content}`} alt="clipboard item" className="max-h-24 rounded-md object-contain"/>
-                            ) : (
-                               <p className="text-sm text-slate-200 break-words whitespace-pre-wrap font-mono">{item.preview}</p>
-                            )}
+                        <div className="mt-2 flex items-center justify-between">
+                            <div className="flex gap-1.5">
+                                {item.tags.map(tag => (
+                                    <span key={tag} className="text-xs bg-slate-700 px-2 py-0.5 rounded-full">{tag}</span>
+                                ))}
+                            </div>
+                            <span className="text-xs text-slate-500">{new Date(item.createdAt).toLocaleTimeString()}</span>
                         </div>
-                        <button onClick={(e) => { e.stopPropagation(); onDelete(item.id); }} className="p-1.5 text-slate-500 rounded-full hover:bg-rose-500/20 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <Icons.Trash className="w-4 h-4"/>
-                        </button>
-                    </div>
-                    <div className="mt-2 flex items-center justify-between">
-                         <div className="flex gap-1.5">
-                            {item.tags.map(tag => <span key={tag} className="text-xs bg-slate-700 px-2 py-0.5 rounded-full">{tag}</span>)}
-                        </div>
-                        <span className="text-xs text-slate-500">{new Date(item.createdAt).toLocaleTimeString()}</span>
-                    </div>
-                </button>
-            ))}
+                    </button>
+                ))}
+            </div>
         </div>
-    </div>
-);
+    );
+};
 
 interface DetailViewProps {
     item: ClipboardItem | null;
     onUpdate: (id: string, updates: Partial<ClipboardItem>) => void;
 }
-const DetailView: React.FC<DetailViewProps> = ({ item, onUpdate }) => {
+const DetailView: React.FC<DetailViewProps> = ({ item }) => {
     const [copied, setCopied] = useState(false);
-    const [isProcessing, setIsProcessing] = useState(false);
-
-    useEffect(() => {
-        setCopied(false);
-        setIsProcessing(false);
-    }, [item]);
-
+    useEffect(() => { setCopied(false); }, [item]);
     if (!item) {
-        return <div className="w-1/3 bg-slate-900/70 p-6 flex flex-col items-center justify-center text-slate-500">
-            <Icons.Clipboard className="w-16 h-16 mb-4"/>
-            <h3 className="text-lg">Select an item</h3>
-            <p className="text-sm text-center">Select an item from the list to see its details and perform actions.</p>
-        </div>;
+        return (
+            <div className="w-1/3 bg-slate-900/70 p-6 flex flex-col items-center justify-center text-slate-500">
+                <Icons.Clipboard className="w-16 h-16 mb-4"/>
+                <h3 className="text-lg">Select an item</h3>
+                <p className="text-sm text-center">Select an item from the list to see its details and perform actions.</p>
+            </div>
+        );
     }
-
     const handleCopy = () => {
         navigator.clipboard.writeText(item.content);
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
     };
-
-    const handleOCR = async () => {
-        if (item.type !== ItemType.IMAGE) return;
-        setIsProcessing(true);
-        const text = await extractTextFromImage(item.content, 'image/png');
-        onUpdate(item.id, { metadata: { ...item.metadata, ocrText: text } });
-        setIsProcessing(false);
-    };
-
-    const handleFormatCode = async () => {
-        if (item.type !== ItemType.CODE || !item.metadata?.language) return;
-        setIsProcessing(true);
-        const formatted = await formatCode(item.content, item.metadata.language);
-        onUpdate(item.id, { content: formatted, preview: truncate(formatted, 100) });
-        setIsProcessing(false);
-    };
-
-    const handleTranslate = async (language: string) => {
-        setIsProcessing(true);
-        const translation = await translateText(item.content, language);
-        onUpdate(item.id, { metadata: { ...item.metadata, translation } });
-        setIsProcessing(false);
-    }
-    
     const renderContent = () => {
         switch (item.type) {
             case ItemType.IMAGE:
@@ -167,9 +152,9 @@ const DetailView: React.FC<DetailViewProps> = ({ item, onUpdate }) => {
             case ItemType.CODE:
                 return (
                     <div className="relative group">
-                      <SyntaxHighlighter language={item.metadata?.language || 'plaintext'} style={atomDark} customStyle={{ margin: 0, borderRadius: '0.5rem', maxHeight: '50vh' }}>
-                        {item.content}
-                      </SyntaxHighlighter>
+                        <SyntaxHighlighter language={item.metadata?.language || 'plaintext'} style={atomDark} customStyle={{ margin: 0, borderRadius: '0.5rem', maxHeight: '50vh' }}>
+                            {item.content}
+                        </SyntaxHighlighter>
                     </div>
                 );
             case ItemType.COLOR:
@@ -183,52 +168,6 @@ const DetailView: React.FC<DetailViewProps> = ({ item, onUpdate }) => {
                 return <p className="text-base whitespace-pre-wrap break-words bg-slate-800 p-4 rounded-lg font-mono">{item.content}</p>;
         }
     };
-    
-    const renderActions = () => {
-      const commonActions = <>
-         {item.metadata?.isSensitive && <div className="flex items-center gap-2 p-2 rounded-md bg-amber-500/10 text-amber-400 text-xs"><Icons.Warning className="w-4 h-4 shrink-0"/> Potentially sensitive data detected.</div>}
-         <button onClick={handleCopy} className="w-full flex items-center justify-center gap-2 p-2 rounded-md bg-sky-500/20 hover:bg-sky-500/30 text-sky-300">
-             {copied ? <><Icons.Check className="w-4 h-4"/> Copied!</> : <><Icons.Copy className="w-4 h-4"/> Copy</>}
-         </button>
-      </>;
-
-      switch(item.type) {
-        case ItemType.IMAGE:
-          return <>
-            {commonActions}
-            <button disabled={isProcessing} onClick={handleOCR} className="w-full flex items-center justify-center gap-2 p-2 rounded-md bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 disabled:opacity-50">
-              <Icons.Brain className="w-4 h-4"/> {isProcessing ? 'Extracting...' : 'Extract Text (OCR)'}
-            </button>
-            {item.metadata?.ocrText && <div className="mt-2 p-3 bg-slate-800 rounded-lg text-sm "><h4 className="font-semibold mb-1 text-slate-400">Extracted Text:</h4><p className="whitespace-pre-wrap">{item.metadata.ocrText}</p></div>}
-          </>;
-        case ItemType.CODE:
-           return <>
-            {commonActions}
-            <button disabled={isProcessing} onClick={handleFormatCode} className="w-full flex items-center justify-center gap-2 p-2 rounded-md bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 disabled:opacity-50">
-              <Icons.Format className="w-4 h-4"/> {isProcessing ? 'Formatting...' : `Format ${item.metadata?.language || ''}`}
-            </button>
-           </>
-        case ItemType.TEXT:
-        case ItemType.LINK:
-        case ItemType.EMAIL:
-        case ItemType.PHONE:
-           return <>
-            {commonActions}
-            <div className="flex gap-2">
-            <button disabled={isProcessing} onClick={() => handleTranslate('Spanish')} className="w-full flex items-center justify-center gap-2 p-2 rounded-md bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 disabled:opacity-50">
-              <Icons.Translate className="w-4 h-4"/> {isProcessing ? 'Translating...' : 'To Spanish'}
-            </button>
-             <button disabled={isProcessing} onClick={() => handleTranslate('Japanese')} className="w-full flex items-center justify-center gap-2 p-2 rounded-md bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 disabled:opacity-50">
-              <Icons.Translate className="w-4 h-4"/> {isProcessing ? 'Translating...' : 'To Japanese'}
-            </button>
-            </div>
-            {item.metadata?.translation && <div className="mt-2 p-3 bg-slate-800 rounded-lg text-sm "><h4 className="font-semibold mb-1 text-slate-400">Translation:</h4><p className="whitespace-pre-wrap">{item.metadata.translation}</p></div>}
-           </>
-        default:
-          return commonActions;
-      }
-    };
-    
     return (
         <div className="w-1/3 bg-slate-800/30 p-6 flex flex-col overflow-y-auto">
             <div className="flex-1">
@@ -242,7 +181,10 @@ const DetailView: React.FC<DetailViewProps> = ({ item, onUpdate }) => {
                 <div className="mb-4">{renderContent()}</div>
             </div>
             <div className="flex flex-col gap-2 mt-auto">
-                {renderActions()}
+                {item.metadata?.isSensitive && <div className="flex items-center gap-2 p-2 rounded-md bg-amber-500/10 text-amber-400 text-xs"><Icons.Warning className="w-4 h-4 shrink-0"/> Potentially sensitive data detected.</div>}
+                <button onClick={handleCopy} className="w-full flex items-center justify-center gap-2 p-2 rounded-md bg-sky-500/20 hover:bg-sky-500/30 text-sky-300">
+                    {copied ? <><Icons.Check className="w-4 h-4"/> Copied!</> : <><Icons.Copy className="w-4 h-4"/> Copy</>}
+                </button>
             </div>
         </div>
     );
@@ -285,11 +227,7 @@ const ClipboardManager: React.FC = () => {
                     tags: [type.toLowerCase()],
                 };
 
-                if (type === ItemType.CODE) {
-                  const { language, isSensitive } = await analyzeCode(text);
-                  newItem.metadata = { language, isSensitive };
-                  newItem.tags.push(language);
-                }
+                                // AI code analysis removed
             }
             
             if (newItem) {
